@@ -39,7 +39,7 @@ struct ServiceList {
 fn get_node_info(version: Option<&str>) -> Result<Json<NodeInfo>, Custom<Json<ErrorMessage>>> {
     match version {
         Some(v) if v == LATEST_VERSION => Ok(Json(NodeInfo {
-            node_name: "EigenLayer-AVS".to_string(),
+            node_name: "EigenLayer-AVS-node".to_string(),
             spec_version: LATEST_VERSION.to_string(),
             node_version: "v1.0.0".to_string(),
         })),
@@ -50,7 +50,7 @@ fn get_node_info(version: Option<&str>) -> Result<Json<NodeInfo>, Custom<Json<Er
             }),
         )),
         None => Ok(Json(NodeInfo {
-            node_name: "EigenLayer-AVS".to_string(),
+            node_name: "EigenLayer-AVS-node".to_string(),
             spec_version: LATEST_VERSION.to_string(),
             node_version: "v1.0.0".to_string(),
         })),
@@ -120,7 +120,7 @@ mod tests {
         assert_eq!(response.content_type(), Some(ContentType::JSON));
         let node_info: NodeInfo =
             serde_json::from_str(response.into_string().unwrap().as_str()).unwrap();
-        assert_eq!(node_info.node_name, "EigenLayer-AVS");
+        assert_eq!(node_info.node_name, "EigenLayer-AVS-node");
         assert_eq!(node_info.spec_version, "0.0.1");
         assert_eq!(node_info.node_version, "v1.0.0");
     }
@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(response.content_type(), Some(ContentType::JSON));
         let node_info: NodeInfo =
             serde_json::from_str(response.into_string().unwrap().as_str()).unwrap();
-        assert_eq!(node_info.node_name, "EigenLayer-AVS");
+        assert_eq!(node_info.node_name, "EigenLayer-AVS-node");
         assert_eq!(node_info.spec_version, "0.0.1");
         assert_eq!(node_info.node_version, "v1.0.0");
     }
