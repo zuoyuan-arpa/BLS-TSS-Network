@@ -1,4 +1,5 @@
 use arpa_contract_client::controller::{ControllerClientBuilder, ControllerTransactions};
+use arpa_stats::rocket;
 use arpa_core::build_wallet_from_config;
 use arpa_core::log::encoder::JsonEncoder;
 use arpa_core::Config;
@@ -313,13 +314,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if is_new_run {
         let client =
             ControllerClientBuilder::<G2Curve>::build_controller_client(&main_chain_identity);
-
         client
             .node_register(dkg_public_key_to_register.unwrap())
             .await?;
     }
 
-    handle.wait_task().await;
+    let stats_handle = tokio::spawn(async move {
+        arpa_stats::rocket().launch().await;
+    });
+
+    tokio::select! {
+        _ = handle.wait_task() => {},
+        _ = stats_handle => {},
+    };
 
     Ok(())
 }

@@ -18,6 +18,7 @@ arpa-core = { path = "../core" }
 arpa-dal = { path = "../dal" }
 arpa-sqlite-db = { path = "../dal/sqlite" }
 arpa-contract-client = { path = "../contract-client" }
+arpa-stats = { path = "../stats" }
 dkg-core = { path = "../dkg-core" }
 threshold-bls = { path = "../threshold-bls", default-features = false, features = [
     "bn254",
