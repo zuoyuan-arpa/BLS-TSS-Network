@@ -3,26 +3,17 @@ pragma solidity ^0.8.18;
 
 pragma experimental ABIEncoderV2;
 
-import {RandcastTestHelper, ERC20, ControllerForTest, IController} from "./RandcastTestHelper.sol";
-import {ICoordinator} from "../src/interfaces/ICoordinator.sol";
+import {RandcastTestHelper, ERC20, ControllerForTest, IController, NodeRegistry} from "./RandcastTestHelper.sol";
 import {BLS} from "../src/libraries/BLS.sol";
 
 contract ExtendedDKGScenarioTest is RandcastTestHelper {
-    uint256 internal _nodeStakingAmount = 50000;
-    uint256 internal _disqualifiedNodePenaltyAmount = 1000;
-    uint256 internal _defaultNumberOfCommitters = 3;
-    uint256 internal _defaultDkgPhaseDuration = 10;
-    uint256 internal _groupMaxCapacity = 6; // ! Set to 6 for extended rebalancing tests.
-    uint256 internal _idealNumberOfGroups = 5;
-    uint256 internal _pendingBlockAfterQuit = 100;
-    uint256 internal _dkgPostProcessReward = 100;
-    uint64 internal _lastOutput = 0x2222222222222222;
-
     address internal _owner = _admin;
 
     // * Setup
-
     function setUp() public {
+        _groupMaxCapacity = 6; // ! Set to 6 for extended rebalancing tests.
+        _lastOutput = 0x2222222222222222;
+
         // add 31 test nodes
         addTestNode(1, _node1, _dkgPubkey1, _partialPublicKey1);
         addTestNode(2, _node2, _dkgPubkey2, _partialPublicKey2);
@@ -74,24 +65,33 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
 
         // deploy _controller
         vm.prank(_owner);
-        _controller = new ControllerForTest(address(_arpa), _lastOutput);
+        _controller = new ControllerForTest(_lastOutput);
+
+        vm.prank(_admin);
+        _nodeRegistry = new NodeRegistry();
+
+        vm.prank(_admin);
+        _nodeRegistry.initialize(address(_arpa), false);
+
+        vm.prank(_admin);
+        _nodeRegistry.setNodeRegistryConfig(
+            address(_controller), address(_staking), _operatorStakeAmount, _pendingBlockAfterQuit
+        );
 
         vm.prank(_owner);
         _controller.setControllerConfig(
-            address(_staking),
+            address(_nodeRegistry),
             address(0),
-            _operatorStakeAmount,
             _disqualifiedNodePenaltyAmount,
             _defaultNumberOfCommitters,
             _defaultDkgPhaseDuration,
             _groupMaxCapacity,
             _idealNumberOfGroups,
-            _pendingBlockAfterQuit,
             _dkgPostProcessReward
         );
 
         vm.prank(_stakingDeployer);
-        _staking.setController(address(_controller));
+        _staking.setController(address(_nodeRegistry));
     }
 
     // * Test Node Setup
@@ -134,7 +134,7 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
     // Take in a uint256 specifying node index, call node register using info from _testNodes mapping
     function registerIndex(uint256 nodeIndex) public {
         vm.prank(_testNodes[nodeIndex].nodeAddress);
-        _controller.nodeRegister(_testNodes[nodeIndex]._publicKey);
+        _nodeRegistry.nodeRegister(_testNodes[nodeIndex]._publicKey, _emptyOperatorSignature);
     }
 
     // * Commit DKG Helper Functions
@@ -162,6 +162,17 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
                     params[i]._publicKey,
                     params[i].partialPublicKey,
                     params[i].disqualifiedNodes
+                )
+            );
+        }
+    }
+
+    function successDKGHelper(uint256[] memory nodeIndices, uint256 groupIndex, uint256 groupEpoch) public {
+        for (uint256 i = 0; i < nodeIndices.length; i++) {
+            vm.prank(_testNodes[nodeIndices[i]].nodeAddress);
+            _controller.commitDkg(
+                IController.CommitDkgParams(
+                    groupIndex, groupEpoch, _publicKey, _testNodes[nodeIndices[i]].partialPublicKey, new address[](0)
                 )
             );
         }
@@ -207,9 +218,13 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         assertEq(_controller.getGroup(0).members.length, 5);
         assertEq(_controller.getGroup(0).size, 5);
 
+        vm.roll(block.number + 41);
+        vm.prank(_node1);
+        _controller.postProcessDkg(0, 3);
+
         // node 1 calls nodeQuit
         vm.prank(_node1);
-        _controller.nodeQuit(); // _controller emits event to start dkg proccess
+        _nodeRegistry.nodeQuit(); // _controller emits event to start dkg proccess
         assertEq(_controller.getGroup(0).epoch, 4); // g.epoch++
 
         // node 2-4 call commitdkg
@@ -307,28 +322,9 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         assertEq(checkIsStrictlyMajorityConsensusReached(0), false);
         assertEq(checkIsStrictlyMajorityConsensusReached(1), false);
         // groups have been reshuffled, current indexes are as follows:
-        // group_0 (5,4,3,7,9), group_1 (6,1,2,8,10)
+        // group_0 (1,2,3,7,9), group_1 (6,5,4,8,10)
 
-        // * Remove two nodes from group_1 (node8, node10) so that group_1 size == 3
-        vm.prank(_node8);
-        _controller.nodeQuit(); // group_1 epoch is incremented here
-        assertEq(_controller.getGroup(1).epoch, 4); // g.epoch++
-        assertEq(_controller.getGroup(1).size, 4); // g.size--
-
-        vm.prank(_node10);
-        _controller.nodeQuit(); // group_1 epoch is incremented here
-        assertEq(_controller.getGroup(1).epoch, 5); // g.epoch++
-        assertEq(_controller.getGroup(1).size, 3); // g.size--
-
-        // * (5,3) configuration reached: group_0 (1,2,3,7,9) / group_1 (6,5,4)
-        assertEq(_controller.getGroup(0).size, 5);
-        assertEq(_controller.getGroup(1).size, 3);
-        assertEq(checkIsStrictlyMajorityConsensusReached(0), false);
-        assertEq(checkIsStrictlyMajorityConsensusReached(1), false);
-        assertEq(_controller.getGroup(0).epoch, 6);
-        assertEq(_controller.getGroup(1).epoch, 5);
-
-        // * group group_0 and group_1 with commitDKG
+        // finish dkg for group_0 and group_1
         params = new Params[](5);
         params[0] = Params(_node1, false, err, 0, 6, _publicKey, _partialPublicKey5, new address[](0));
         params[1] = Params(_node2, false, err, 0, 6, _publicKey, _partialPublicKey4, new address[](0));
@@ -337,6 +333,48 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         params[4] = Params(_node9, false, err, 0, 6, _publicKey, _partialPublicKey9, new address[](0));
         dkgHelper(params);
 
+        uint256[] memory nodeIndices2 = new uint256[](5);
+        nodeIndices2[0] = 6;
+        nodeIndices2[1] = 5;
+        nodeIndices2[2] = 4;
+        nodeIndices2[3] = 8;
+        nodeIndices2[4] = 10;
+        successDKGHelper(nodeIndices2, 1, 3);
+
+        vm.roll(block.number + 41);
+        vm.prank(_node8);
+        _controller.postProcessDkg(1, 3);
+
+        // * Remove two nodes from group_1 (node8, node10) so that group_1 size == 3
+        vm.prank(_node8);
+        _nodeRegistry.nodeQuit(); // group_1 epoch is incremented here
+        assertEq(_controller.getGroup(1).epoch, 4); // g.epoch++
+        assertEq(_controller.getGroup(1).size, 4); // g.size--
+
+        uint256[] memory nodeIndices3 = new uint256[](4);
+        nodeIndices3[0] = 6;
+        nodeIndices3[1] = 5;
+        nodeIndices3[2] = 4;
+        nodeIndices3[3] = 10;
+        successDKGHelper(nodeIndices3, 1, 4);
+
+        vm.roll(block.number + 41);
+        vm.prank(_node10);
+        _controller.postProcessDkg(1, 4);
+
+        vm.prank(_node10);
+        _nodeRegistry.nodeQuit(); // group_1 epoch is incremented here
+        assertEq(_controller.getGroup(1).epoch, 5); // g.epoch++
+        assertEq(_controller.getGroup(1).size, 3); // g.size--
+
+        // * (5,3) configuration reached: group_0 (1,2,3,7,9) / group_1 (6,5,4)
+        assertEq(_controller.getGroup(0).size, 5);
+        assertEq(_controller.getGroup(1).size, 3);
+        assertEq(checkIsStrictlyMajorityConsensusReached(1), false);
+        assertEq(_controller.getGroup(0).epoch, 6);
+        assertEq(_controller.getGroup(1).epoch, 5);
+
+        // * group group_1 with commitDKG
         params = new Params[](3);
         params[0] = Params(_node6, false, err, 1, 5, _publicKey, _partialPublicKey6, new address[](0));
         params[1] = Params(_node5, false, err, 1, 5, _publicKey, _partialPublicKey1, new address[](0));
@@ -348,9 +386,13 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         assertEq(_controller.getGroup(0).epoch, 6); // g.epoch++
         assertEq(_controller.getGroup(1).epoch, 5); // g.epoch++
 
+        vm.roll(block.number + 41);
+        vm.prank(_node6);
+        _controller.postProcessDkg(1, 5);
+
         // * node in group_1 quits (node6)
         vm.prank(_node6);
-        _controller.nodeQuit();
+        _nodeRegistry.nodeQuit();
         // group_1 falls below threshold, rebalancing occurs to (3,4), event emitted for both groups
         assertEq(_controller.getGroup(0).epoch, 7); // g.epoch++
         assertEq(_controller.getGroup(1).epoch, 6); // g.epoch++
@@ -685,6 +727,9 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         registerIndex(11);
         registerIndex(12);
 
+        printGroupInfo(0);
+        printGroupInfo(1);
+
         // Current state: group_0 (1,6,3,8,9,11), group_1 (7,2,5,4,10,12)
 
         assertEq(_controller.getGroup(0).size, 6);
@@ -692,23 +737,71 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         assertEq(_controller.getGroup(0).epoch, 8);
         assertEq(_controller.getGroup(1).epoch, 3);
 
+        uint256[] memory nodeIndices = new uint256[](6);
+        nodeIndices[0] = 7;
+        nodeIndices[1] = 2;
+        nodeIndices[2] = 5;
+        nodeIndices[3] = 4;
+        nodeIndices[4] = 10;
+        nodeIndices[5] = 12;
+        successDKGHelper(nodeIndices, 1, 3);
+
+        vm.roll(block.number + 41);
+        vm.prank(_node12);
+        _controller.postProcessDkg(1, 3);
+
         // Reduce group_1 size to 3
         vm.prank(_node12);
-        _controller.nodeQuit();
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 4); //g.epoch++
+
+        uint256[] memory nodeIndices1 = new uint256[](5);
+        nodeIndices1[0] = 7;
+        nodeIndices1[1] = 2;
+        nodeIndices1[2] = 5;
+        nodeIndices1[3] = 4;
+        nodeIndices1[4] = 10;
+        successDKGHelper(nodeIndices1, 1, 4);
+
+        vm.roll(block.number + 41);
         vm.prank(_node10);
-        _controller.nodeQuit();
+        _controller.postProcessDkg(1, 4);
+
+        vm.prank(_node10);
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 5); //g.epoch++
+
+        uint256[] memory nodeIndices2 = new uint256[](4);
+        nodeIndices2[0] = 7;
+        nodeIndices2[1] = 2;
+        nodeIndices2[2] = 5;
+        nodeIndices2[3] = 4;
+        successDKGHelper(nodeIndices2, 1, 5);
+
+        vm.roll(block.number + 41);
         vm.prank(_node2);
-        _controller.nodeQuit();
+        _controller.postProcessDkg(1, 5);
+
+        vm.prank(_node2);
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 6); //g.epoch++
+
+        uint256[] memory nodeIndices3 = new uint256[](3);
+        nodeIndices3[0] = 7;
+        nodeIndices3[1] = 4;
+        nodeIndices3[2] = 5;
+        successDKGHelper(nodeIndices3, 1, 6);
+
+        vm.roll(block.number + 41);
+        vm.prank(_node7);
+        _controller.postProcessDkg(1, 6);
         // size [6,3] reached
         // Current state: group_0 (1,6,3,8,9,11), group_1 (7,4,5)
 
         // node7 from group_1 calls nodeQuit
         // _controller rebalances between group_0 and group_1 resulting in [4,4]
         vm.prank(_node7);
-        _controller.nodeQuit();
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(0).size, 4);
         assertEq(_controller.getGroup(1).size, 4);
         assertEq(_controller.getGroup(0).epoch, 9); //g.epoch++
@@ -750,22 +843,71 @@ contract ExtendedDKGScenarioTest is RandcastTestHelper {
         assertEq(_controller.getGroup(0).epoch, 8);
         assertEq(_controller.getGroup(1).epoch, 3);
 
+        uint256[] memory nodeIndices1 = new uint256[](6);
+        nodeIndices1[0] = 1;
+        nodeIndices1[1] = 6;
+        nodeIndices1[2] = 3;
+        nodeIndices1[3] = 8;
+        nodeIndices1[4] = 9;
+        nodeIndices1[5] = 11;
+        successDKGHelper(nodeIndices1, 0, 8);
+
+        uint256[] memory nodeIndices2 = new uint256[](6);
+        nodeIndices2[0] = 7;
+        nodeIndices2[1] = 2;
+        nodeIndices2[2] = 5;
+        nodeIndices2[3] = 4;
+        nodeIndices2[4] = 10;
+        nodeIndices2[5] = 12;
+        successDKGHelper(nodeIndices2, 1, 3);
+
+        vm.roll(block.number + 41);
+        vm.prank(_node1);
+        _controller.postProcessDkg(0, 8);
+        vm.prank(_node12);
+        _controller.postProcessDkg(1, 3);
+
         // Reduce group_1 size to 3
         vm.prank(_node12);
-        _controller.nodeQuit();
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 4); //g.epoch++
+
+        uint256[] memory nodeIndices3 = new uint256[](5);
+        nodeIndices3[0] = 7;
+        nodeIndices3[1] = 2;
+        nodeIndices3[2] = 5;
+        nodeIndices3[3] = 4;
+        nodeIndices3[4] = 10;
+        successDKGHelper(nodeIndices3, 1, 4);
+
+        vm.roll(block.number + 41);
         vm.prank(_node10);
-        _controller.nodeQuit();
+        _controller.postProcessDkg(1, 4);
+
+        vm.prank(_node10);
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 5); //g.epoch++
+
+        uint256[] memory nodeIndices4 = new uint256[](4);
+        nodeIndices4[0] = 7;
+        nodeIndices4[1] = 2;
+        nodeIndices4[2] = 5;
+        nodeIndices4[3] = 4;
+        successDKGHelper(nodeIndices4, 1, 5);
+
+        vm.roll(block.number + 41);
         vm.prank(_node2);
-        _controller.nodeQuit();
+        _controller.postProcessDkg(1, 5);
+
+        vm.prank(_node2);
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(1).epoch, 6); //g.epoch++
         // size [6,3] reached
         // current state: group_0 (1,6,3,8,9,11), group_1 (7,4,5)
 
         // node11 from group_0 calls nodeQuit
         vm.prank(_node11);
-        _controller.nodeQuit();
+        _nodeRegistry.nodeQuit();
         assertEq(_controller.getGroup(0).size, 5);
         assertEq(_controller.getGroup(1).size, 3);
         assertEq(_controller.getGroup(0).epoch, 9); // g.epoch++
