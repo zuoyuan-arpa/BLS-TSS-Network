@@ -1,5 +1,4 @@
 use arpa_contract_client::controller::ControllerClientBuilder;
-use arpa_stats::rocket;
 use arpa_contract_client::controller::ControllerViews;
 use arpa_contract_client::node_registry::{NodeRegistryClientBuilder, NodeRegistryTransactions};
 use arpa_core::build_wallet_from_config;
